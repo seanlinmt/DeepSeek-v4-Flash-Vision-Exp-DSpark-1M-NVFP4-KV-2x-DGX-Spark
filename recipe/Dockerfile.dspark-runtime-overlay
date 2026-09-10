@@ -4,8 +4,7 @@
 
 FROM ghcr.io/bjk110/vllm-spark:unholy-fusion-prod-ready
 
-LABEL org.bjk110.dspark.runtime="clean-overlay" \
-      org.bjk110.dspark.reference-kv-quant-dequant="runtime-flag"
+LABEL org.bjk110.dspark.runtime="clean-overlay"       org.bjk110.dspark.reference-kv-quant-dequant="runtime-flag"
 
 COPY vllm/envs.py /opt/env/lib/python3.12/site-packages/vllm/envs.py
 COPY vllm/config/speculative.py /opt/env/lib/python3.12/site-packages/vllm/config/speculative.py
@@ -60,6 +59,7 @@ COPY vllm/tokenizers/deepseek_v4_encoding.py /opt/env/lib/python3.12/site-packag
 # The deepseek_v4 tool parser is a thin subclass of this one, so patching here
 # fixes both. See docs and the VS Code reproduction in the repo history.
 COPY vllm/tool_parsers/deepseekv32_tool_parser.py /opt/env/lib/python3.12/site-packages/vllm/tool_parsers/deepseekv32_tool_parser.py
+COPY vllm/v1/engine/detokenizer.py /opt/env/lib/python3.12/site-packages/vllm/v1/engine/detokenizer.py
 
 RUN /opt/env/bin/python -m py_compile \
     /opt/env/lib/python3.12/site-packages/vllm/envs.py \
@@ -76,7 +76,8 @@ RUN /opt/env/bin/python -m py_compile \
     /opt/env/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py \
     /opt/env/lib/python3.12/site-packages/vllm/tokenizers/deepseek_v4.py \
     /opt/env/lib/python3.12/site-packages/vllm/tokenizers/deepseek_v4_encoding.py \
-    /opt/env/lib/python3.12/site-packages/vllm/tool_parsers/deepseekv32_tool_parser.py
+    /opt/env/lib/python3.12/site-packages/vllm/tool_parsers/deepseekv32_tool_parser.py \
+    /opt/env/lib/python3.12/site-packages/vllm/v1/engine/detokenizer.py
 
 # py_compile only validates syntax. A file that compiles but fails to import --
 # a renamed symbol, a moved module, a bad relative import -- produces a green
@@ -93,6 +94,7 @@ CHECKS = [
     ("vllm.tool_parsers.deepseekv4_tool_parser", "DeepSeekV4ToolParser"),
     ("vllm.tokenizers.deepseek_v4", "DeepseekV4Tokenizer"),
     ("vllm.tokenizers.deepseek_v4_encoding", "encode_messages"),
+    ("vllm.v1.engine.detokenizer", "IncrementalDetokenizer"),
 ]
 
 failed = False
