@@ -3,26 +3,34 @@
 # DeepSeek-V4-Flash-Vision-Exp TP2 on 2x DGX Spark (ai + ai2).
 set -euo pipefail
 
-NODE_RANK="${1:?usage: launch-node.sh <0|1>}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  # shellcheck disable=SC1091
+  set -a
+  source "$SCRIPT_DIR/.env"
+  set +a
+fi
+
+NODE_RANK="${1:-${NODE_RANK:?usage: launch-node.sh <0|1>}}"
 [[ "$NODE_RANK" == "0" || "$NODE_RANK" == "1" ]] || { echo "rank must be 0 or 1" >&2; exit 2; }
 
 IMAGE="${DSPARK_VLLM_IMAGE:-vllm-dspark-runtime:dspark-nvfp4-stage-c}"
 NAME="vllm_ds4_vision"
-MODEL_HOST_DIR="${MODEL_HOST_DIR:-/mnt/nvmeof/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-Vision-Exp}"
-SNAPSHOT_NAME="${SNAPSHOT_NAME:-6821d6ad3681a4b137b066b76094fa82ebd0a380}"
-MODEL_IN_CONTAINER="/models/DeepSeek-V4-Flash-Vision-Exp/snapshots/$SNAPSHOT_NAME"
-CACHE_HOST_PATH="${CACHE_HOST_PATH:-/var/tmp/vllm-dspark}"
-MASTER_ADDR="192.168.177.11"
-MASTER_PORT="25440"
-PORT="8888"
+MODEL="${DSPARK_MODEL:-${MODEL:-drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit}}"
+MODEL_IN_CONTAINER="$MODEL"
+HF_CACHE_DIR="${HF_CACHE:-$HOME/.cache/huggingface}/hub/models--${MODEL//\//--}"
+CACHE_HOST_PATH="${JIT_CACHE_DIR:-${CACHE_HOST_PATH:-/var/tmp/vllm-dspark}}"
+MASTER_ADDR="${MASTER_ADDR:-192.168.177.11}"
+MASTER_PORT="${MASTER_PORT:-25440}"
+PORT="${VLLM_PORT:-8888}"
 
 case "$NODE_RANK" in
-  0) HOST_IP="192.168.177.11"; HEADLESS="" ;;
-  1) HOST_IP="192.168.177.12"; HEADLESS="--headless" ;;
+  0) HOST_IP="${VLLM_HOST_IP:-192.168.177.11}"; HEADLESS="" ;;
+  1) HOST_IP="${WORKER_VLLM_HOST_IP:-192.168.177.12}"; HEADLESS="--headless" ;;
 esac
 
-test -f "$MODEL_HOST_DIR/snapshots/$SNAPSHOT_NAME/config.json" || {
-  echo "MODEL MISSING at $MODEL_HOST_DIR/snapshots/$SNAPSHOT_NAME" >&2; exit 3;
+test -d "$HF_CACHE_DIR" || {
+  echo "MODEL CACHE MISSING at $HF_CACHE_DIR" >&2; exit 3;
 }
 test -f /var/tmp/patch3-scheduler.py || { echo "patch3-scheduler.py MISSING at /var/tmp" >&2; exit 4; }
 test -f /var/tmp/spec-dspark.py || { echo "spec-dspark.py MISSING at /var/tmp" >&2; exit 4; }
@@ -34,14 +42,13 @@ test -f /var/tmp/ds4v_registry.py || { echo "ds4v_registry.py MISSING at /var/tm
 mkdir -p "$CACHE_HOST_PATH" "$HOME/.cache/huggingface"
 docker rm -f "$NAME" 2>/dev/null || true
 
-SPEC='{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'
+SPEC="{\"method\":\"dspark\",\"num_speculative_tokens\":${MTP_NUM_TOKENS:-3},\"draft_sample_method\":\"probabilistic\"}"
 REASON='{"reasoning_parser":"deepseek_v4","reasoning_start_str":"<think>","reasoning_end_str":"</think>"}'
 
 docker run -d --name "$NAME" --restart no \
   --network host --ipc host --shm-size 64g \
   --ulimit memlock=-1:-1 --ulimit stack=67108864 \
   --gpus all --device /dev/infiniband:/dev/infiniband \
-  -v "$MODEL_HOST_DIR:/models/DeepSeek-V4-Flash-Vision-Exp:ro" \
   -v "$HOME/.cache/huggingface:/cache/huggingface" \
   -v "$CACHE_HOST_PATH:/vllm-cache" \
   -v /var/tmp/patch3-scheduler.py:/opt/env/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py:ro \
@@ -60,7 +67,7 @@ docker run -d --name "$NAME" --restart no \
   -e TORCH_EXTENSIONS_DIR=/vllm-cache/torch_extensions \
   -e VLLM_ENGINE_READY_TIMEOUT_S=3600 \
   -e VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 \
-  -e DSPARK_SLOT_CLAMP=1 \
+  -e DSPARK_SLOT_CLAMP=1 -e MTP_NUM_TOKENS="${MTP_NUM_TOKENS:-3}" \
   -e VLLM_HOST_IP="$HOST_IP" \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   -e VLLM_TRITON_MLA_SPARSE=1 \
@@ -80,15 +87,18 @@ docker run -d --name "$NAME" --restart no \
   -e TORCH_CUDA_ARCH_LIST=12.1a -e FLASHINFER_CUDA_ARCH_LIST=12.1a -e FLASHINFER_DISABLE_VERSION_CHECK=1 \
   -e TILELANG_CLEANUP_TEMP_FILES=1 -e DG_JIT_USE_NVRTC=0 -e DG_JIT_NVCC_COMPILER=/opt/env/bin/nvcc \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  -e NCCL_NET=IB -e NCCL_IB_DISABLE=0 \
-  -e NCCL_IB_HCA=rocep1s0f0 \
-  -e NCCL_SOCKET_IFNAME=enp1s0f0np0 -e GLOO_SOCKET_IFNAME=enp1s0f0np0 -e TP_SOCKET_IFNAME=enp1s0f0np0 \
-  -e NCCL_IB_GID_INDEX=3 -e NCCL_CROSS_NIC=0 -e NCCL_IB_MERGE_NICS=0 \
+  -e NCCL_NET="${NCCL_NET:-IB}" -e NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}" \
+  -e NCCL_IB_HCA="${NCCL_IB_HCA:-rocep1s0f0,roceP2p1s0f0}" \
+  -e NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp1s0f0np0}" \
+  -e GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-enp1s0f0np0}" \
+  -e TP_SOCKET_IFNAME="${TP_SOCKET_IFNAME:-enp1s0f0np0}" \
+  -e NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}" -e NCCL_IB_MERGE_NICS="${NCCL_IB_MERGE_NICS:-1}" \
   -e NCCL_IB_ROCE_VERSION_NUM=2 -e NCCL_IB_ADDR_FAMILY=AF_INET \
-  -e NCCL_IB_ADDR_RANGE=192.168.177.0/24 \
+  -e NCCL_IB_ADDR_RANGE="${NCCL_IB_ADDR_RANGE:-192.168.177.0/24,192.168.178.0/24}" \
   -e NCCL_CUMEM_ENABLE=0 -e NCCL_IGNORE_CPU_AFFINITY=1 -e NCCL_DEBUG=WARN -e NCCL_NVLS_ENABLE=0 \
   "$IMAGE" \
   bash -lc "
+    unset NCCL_IB_GID_INDEX;
     export PATH=\"/opt/env/bin:/opt/env/nvvm/bin:/opt/env/targets/sbsa-linux/nvvm/bin:\${PATH:-}\";
     export CUDA_HOME=\"\${CUDA_HOME:-/opt/env/targets/sbsa-linux}\";
     export CUDA_PATH=\"\${CUDA_PATH:-\${CUDA_HOME}}\";
@@ -106,7 +116,7 @@ docker run -d --name "$NAME" --restart no \
       --max-num-seqs 12 \
       --max-num-batched-tokens 8192 \
       --max-cudagraph-capture-size 12 \
-      --gpu-memory-utilization 0.85 \
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.80} \
       --enable-prefix-caching \
       --async-scheduling \
       --enable-chunked-prefill \
